@@ -11,7 +11,7 @@ import spacy
 from torch.utils.data._utils.collate import default_collate
 from data_loaders.humanml.utils.word_vectorizer import WordVectorizer
 from data_loaders.humanml.utils.get_opt import get_opt
-from ..scripts.motion_process import recover_root_rot_pos, recover_from_ric
+from ..scripts.motion_process import recover_root_rot_pos, recover_from_ric, resample_trajectory_64
 from data_loaders.humanml.utils.metrics import cross_combination_joints
 # import spacy
 
@@ -270,23 +270,28 @@ class Text2MotionDatasetV2(data.Dataset):
         motion = motion[idx:idx+m_length]
 
         n_joints = 22 if motion.shape[-1] == 263 else 21
+        # TODO: needs to change the hint to the path
         # hint is global position of the controllable joints
         joints = recover_from_ric(torch.from_numpy(motion).float(), n_joints)
         joints = joints.numpy()
 
-        # control any joints at any time
-        if self.mode == 'train':
-            # hint = self.random_mask_train_cross(joints, n_joints)
-            hint = self.random_mask_train(joints, n_joints)
-        else:
-            # hint = self.random_mask_cross(joints, n_joints)
-            hint = self.random_mask(joints, n_joints)
+        # # control any joints at any time
+        # if self.mode == 'train':
+        #     # hint = self.random_mask_train_cross(joints, n_joints)
+        #     hint = self.random_mask_train(joints, n_joints)
+        # else:
+        #     # hint = self.random_mask_cross(joints, n_joints)
+        #     hint = self.random_mask(joints, n_joints)
 
-        hint = hint.reshape(hint.shape[0], -1)
-        if m_length < self.max_motion_length:
-            hint = np.concatenate([hint,
-                                   np.zeros((self.max_motion_length - m_length, hint.shape[1]))
-                                    ], axis=0)
+        root = joints[:, 0, [0, 2]]
+        path = resample_trajectory_64(root)   # [64, 2]
+        hint = (path - self.raw_mean.reshape(n_joints, 3)[0:1, [0, 2]]) / (self.raw_std.reshape(n_joints, 3)[0:1, [0, 2]])
+
+        # hint = hint.reshape(hint.shape[0], -1)
+        # if m_length < self.max_motion_length:
+        #     hint = np.concatenate([hint,
+        #                            np.zeros((self.max_motion_length - m_length, hint.shape[1]))
+        #                             ], axis=0)
 
         "Z Normalization"
         motion = (motion - self.mean) / self.std

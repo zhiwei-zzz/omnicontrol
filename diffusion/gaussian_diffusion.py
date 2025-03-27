@@ -14,7 +14,7 @@ import torch
 import torch as th
 from copy import deepcopy
 from diffusion.nn import mean_flat, sum_flat
-from data_loaders.humanml.scripts.motion_process import recover_from_ric
+from data_loaders.humanml.scripts.motion_process import recover_from_ric, resample_trajectory_64_torch_diff
 from os.path import join as pjoin
 
 
@@ -288,6 +288,7 @@ class GaussianDiffusion:
     def p_mean_variance(
         self, model, x, t, clip_denoised=True, denoised_fn=None, model_kwargs=None
     ):
+        # Key functions for the model.
         """
         Apply the model to get p(x_{t-1} | x_t), as well as a prediction of
         the initial x, x_0.
@@ -439,6 +440,35 @@ class GaussianDiffusion:
             grad[..., 0] = 0
             x.detach()
         return loss, grad
+    
+    def path_gradients(self, x, hint, mask):
+        with torch.enable_grad():
+            x.requires_grad_(True)
+
+            x_ = x.permute(0, 3, 2, 1).contiguous()
+            x_ = x_.squeeze(2)
+            x_ = x_ * self.std + self.mean
+            n_joints = 22 if x_.shape[-1] == 263 else 21
+            joint_pos = recover_from_ric(x_, n_joints)
+            if n_joints == 21:
+                raise NotImplementedError()
+                joint_pos = joint_pos * 0.001
+                hint = hint * 0.001
+            loss = 0
+            for i in range(joint_pos.shape[0]):
+                cur_joints = joint_pos[i]
+                cur_mask = mask[i, 0, 0, :]
+                cur_joints = cur_joints[cur_mask]
+                cur_root = cur_joints[:, 0, [0, 2]]
+                cur_path = resample_trajectory_64_torch_diff(cur_root)
+                cur_path_hint = hint[i]
+                loss += (torch.norm(cur_path - cur_path_hint, dim=-1)).sum()
+            # loss = torch.norm((joint_pos - hint) * mask_hint, dim=-1)
+            grad = torch.autograd.grad([loss.sum()], [x])[0]
+            # the motion in HumanML3D always starts at the origin (0,y,0), so we zero out the gradients for the root joint
+            grad[..., 0] = 0
+            x.detach()
+        return loss, grad
 
     def calc_grad_scale(self, mask_hint):
         assert mask_hint.shape[1] == 196
@@ -451,6 +481,8 @@ class GaussianDiffusion:
         """
         Spatial guidance
         """
+        # TODO: needs to change to support the path accordingly
+        mask = model_kwargs['y']['mask']
         n_joint = 22 if x.shape[1] == 263 else 21
         model_log_variance = _extract_into_tensor(self.posterior_log_variance_clipped, t, x.shape)
         model_variance = torch.exp(model_log_variance)
@@ -471,25 +503,29 @@ class GaussianDiffusion:
 
         # process hint
         hint = model_kwargs['y']['hint'].clone().detach()
-        mask_hint = hint.view(hint.shape[0], hint.shape[1], n_joint, 3).sum(dim=-1, keepdim=True) != 0
+        # mask_hint = hint.view(hint.shape[0], hint.shape[1], n_joint, 3).sum(dim=-1, keepdim=True) != 0
         if self.raw_std.device != hint.device:
             self.raw_mean = self.raw_mean.to(hint.device)
             self.raw_std = self.raw_std.to(hint.device)
             self.mean = self.mean.to(hint.device)
             self.std = self.std.to(hint.device)
-        hint = hint * self.raw_std + self.raw_mean
-        hint = hint.view(hint.shape[0], hint.shape[1], n_joint, 3) * mask_hint
+
+        hint = hint * self.raw_std[None, None, [0,2]] + self.raw_mean[None, None, [0,2]]
+        # hint = hint * self.raw_std + self.raw_mean
+        # hint = hint.view(hint.shape[0], hint.shape[1], n_joint, 3) * mask_hint
         # joint id
-        joint_ids = []
-        for m in mask_hint:
-            joint_id = torch.nonzero(m.sum(0).squeeze(-1) != 0).squeeze(1)
-            joint_ids.append(joint_id)
+        # joint_ids = []
+        # for m in mask_hint:
+        #     joint_id = torch.nonzero(m.sum(0).squeeze(-1) != 0).squeeze(1)
+        #     joint_ids.append(joint_id)
         
         if not train:
-            scale = self.calc_grad_scale(mask_hint)
+            # scale = self.calc_grad_scale(mask_hint)
+            scale = 20 / 150
 
         for _ in range(n_guide_steps):
-            loss, grad = self.gradients(x, hint, mask_hint, joint_ids)
+            # loss, grad = self.gradients(x, hint, mask_hint, joint_ids)
+            loss, grad = self.path_gradients(x, hint, mask)
             grad = model_variance * grad
             # print(loss.sum())
             if t[0] >= t_stopgrad:
@@ -694,6 +730,7 @@ class GaussianDiffusion:
                 img = out["sample"]
 
     def training_losses(self, model, x_start, t, model_kwargs=None, noise=None, dataset=None):
+        # Key function for training the model.
         """
         Compute training losses for a single timestep.
 
@@ -706,7 +743,7 @@ class GaussianDiffusion:
         :return: a dict with the key "loss" containing a tensor of shape [N].
                  Some mean or variance settings may also have other keys.
         """
-
+        # import pdb; pdb.set_trace()
         mask = model_kwargs['y']['mask']
 
         if model_kwargs is None:

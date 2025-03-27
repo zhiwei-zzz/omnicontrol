@@ -89,7 +89,8 @@ class CMDM(torch.nn.Module):
         # --- CMDM ---
         # input 263 or 6 * 3 or 3
         n_joints = 22 if njoints == 263 else 21
-        self.input_hint_block = HintBlock(self.data_rep, n_joints * 3, self.latent_dim)
+        self.input_hint_block = HintBlock(self.data_rep, 2, self.latent_dim)
+        # self.input_hint_block = HintBlock(self.data_rep, n_joints * 3, self.latent_dim)
 
         self.c_input_process = InputProcess(self.data_rep, self.input_feats+self.gru_emb_dim, self.latent_dim)
 
@@ -166,7 +167,6 @@ class CMDM(torch.nn.Module):
         emb = self.c_embed_timestep(timesteps)  # [1, bs, d]
 
         seq_mask = y['hint'].sum(-1) != 0
-
         guided_hint = self.input_hint_block(y['hint'].float())  # [bs, d]
 
         force_mask = y.get('uncond', False)
@@ -176,7 +176,10 @@ class CMDM(torch.nn.Module):
 
         x = self.c_input_process(x)
 
-        x += guided_hint * seq_mask.permute(1, 0).unsqueeze(-1)
+        # import pdb; pdb.set_trace()
+        x = x + guided_hint.mean(dim=0, keepdim=True)
+
+        # x += guided_hint * seq_mask.permute(1, 0).unsqueeze(-1)
 
         # adding the timestep embed
         xseq = torch.cat((emb, x), axis=0)  # [seqlen+1, bs, d]
