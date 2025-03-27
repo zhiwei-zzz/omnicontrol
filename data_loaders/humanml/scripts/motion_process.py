@@ -9,6 +9,65 @@ from data_loaders.humanml.utils.paramUtil import *
 import torch
 from tqdm import tqdm
 
+from torch.nn.utils.rnn import pad_sequence
+
+def batched_resample_trajectory(points_list, num_samples=64, tau=1e-2):
+    """
+    Batched differentiable resampling of a list of 2D trajectories (each of shape (L_i, 2))
+    to exactly num_samples points with approximately constant arc-length spacing.
+    
+    Args:
+        points_list: list of length B, each element is a (L_i, 2) tensor.
+        num_samples: desired number of output points (default 64).
+        tau: softmax temperature.
+        
+    Returns:
+        resampled: (B, num_samples, 2) tensor.
+    """
+    # Pad trajectories to shape (B, L_max, 2)
+    padded = pad_sequence(points_list, batch_first=True)  # shape (B, L_max, 2)
+    B, L_max, _ = padded.shape
+    
+    # Create a mask for valid positions (True for valid, False for padded).
+    lengths = torch.tensor([p.shape[0] for p in points_list], device=padded.device)
+    valid_mask = torch.arange(L_max, device=padded.device).unsqueeze(0) < lengths.unsqueeze(1)  # (B, L_max)
+
+    # Compute differences along the time dimension.
+    diffs = padded[:, 1:, :] - padded[:, :-1, :]  # (B, L_max-1, 2)
+    seg_lengths = torch.norm(diffs, dim=-1)         # (B, L_max-1)
+    # Mask out differences that involve padded positions.
+    seg_mask = (torch.arange(L_max - 1, device=padded.device).unsqueeze(0) < (lengths - 1).unsqueeze(1))
+    seg_lengths = seg_lengths * seg_mask.float()
+
+    # Compute cumulative arc-lengths, and prepend 0.
+    cum_lengths = torch.cumsum(seg_lengths, dim=1)  # (B, L_max-1)
+    zeros = torch.zeros(B, 1, device=padded.device, dtype=padded.dtype)
+    cum_lengths = torch.cat([zeros, cum_lengths], dim=1)  # (B, L_max)
+    
+    # For each sequence, get total length (last valid value).
+    total_length = torch.gather(cum_lengths, 1, (lengths - 1).unsqueeze(1)).squeeze(1)  # (B,)
+    # Avoid division by zero.
+    total_length = total_length + 1e-6
+    
+    # Normalize cumulative lengths to [0, 1].
+    norm_arcs = cum_lengths / total_length.unsqueeze(1)  # (B, L_max)
+    # For padded positions, set to a large negative value so softmax assigns near zero weight.
+    norm_arcs[~valid_mask] = -1e9
+
+    # Create sample positions (same for all batches).
+    sample_positions = torch.linspace(0, 1, steps=num_samples, device=padded.device, dtype=padded.dtype)  # (num_samples,)
+    # Expand dimensions: (B, num_samples, L_max)
+    sample_positions = sample_positions.unsqueeze(0).unsqueeze(-1)  # (1, num_samples, 1)
+    norm_arcs = norm_arcs.unsqueeze(1)  # (B, 1, L_max)
+    
+    # Compute absolute difference and weights.
+    diff = torch.abs(sample_positions - norm_arcs)  # (B, num_samples, L_max)
+    weights = torch.softmax(-diff / tau, dim=-1)      # (B, num_samples, L_max)
+    
+    # Weighted sum to get the resampled trajectory.
+    resampled = torch.matmul(weights, padded)         # (B, num_samples, 2)
+    return resampled
+
 def resample_trajectory_64(points):
         """
         Resample a 2D trajectory of shape (N, 2) to exactly 64 points 

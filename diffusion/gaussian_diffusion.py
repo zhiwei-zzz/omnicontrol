@@ -14,7 +14,7 @@ import torch
 import torch as th
 from copy import deepcopy
 from diffusion.nn import mean_flat, sum_flat
-from data_loaders.humanml.scripts.motion_process import recover_from_ric, resample_trajectory_64_torch_diff
+from data_loaders.humanml.scripts.motion_process import recover_from_ric, batched_resample_trajectory, resample_trajectory_64_torch_diff
 from os.path import join as pjoin
 
 
@@ -455,15 +455,27 @@ class GaussianDiffusion:
                 joint_pos = joint_pos * 0.001
                 hint = hint * 0.001
             loss = 0
-            for i in range(joint_pos.shape[0]):
-                cur_joints = joint_pos[i]
-                cur_mask = mask[i, 0, 0, :]
-                cur_joints = cur_joints[cur_mask]
-                cur_root = cur_joints[:, 0, [0, 2]]
-                cur_path = resample_trajectory_64_torch_diff(cur_root)
-                cur_path_hint = hint[i]
-                loss += (torch.norm(cur_path - cur_path_hint, dim=-1)).sum()
-            # loss = torch.norm((joint_pos - hint) * mask_hint, dim=-1)
+            # for i in range(joint_pos.shape[0]):
+            #     cur_joints = joint_pos[i]
+            #     cur_mask = mask[i, 0, 0, :]
+            #     cur_joints = cur_joints[cur_mask]
+            #     cur_root = cur_joints[:, 0, [0, 2]]
+            #     cur_path = resample_trajectory_64_torch_diff(cur_root)
+            #     cur_path_hint = hint[i]
+            #     loss += (torch.norm(cur_path - cur_path_hint, dim=-1)).sum()
+
+            B = joint_pos.shape[0]
+            # Extract the trajectories from each batch element.
+            trajectories = []
+            for i in range(B):
+                cur_mask = mask[i, 0, 0, :].bool()
+                # Select valid joints, then choose coordinate indices [0,2].
+                traj = joint_pos[i][cur_mask][:, 0, [0, 2]]  # (L_i, 2)
+                trajectories.append(traj)
+
+
+            resampled = batched_resample_trajectory(trajectories, num_samples=64, tau=1e-2)  # (B, 64, 2)
+            loss = torch.norm(resampled - hint, dim=-1).sum()
             grad = torch.autograd.grad([loss.sum()], [x])[0]
             # the motion in HumanML3D always starts at the origin (0,y,0), so we zero out the gradients for the root joint
             grad[..., 0] = 0
